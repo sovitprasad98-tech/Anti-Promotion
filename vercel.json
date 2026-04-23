@@ -14,10 +14,5 @@
       "src": "/api/webhook",
       "dest": "/api/webhook.py"
     }
-  ],
-  "env": {
-    "BOT_TOKEN": "@bot_token",
-    "GROQ_API_KEY": "@groq_api_key",
-    "WEBHOOK_URL": "@webhook_url"
-  }
+  ]
 }
