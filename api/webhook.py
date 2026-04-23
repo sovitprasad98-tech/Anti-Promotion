@@ -1,46 +1,46 @@
-"""
-api/webhook.py — Vercel serverless entry point (Flask-based)
-"""
-import sys
-import os
+from http.server import BaseHTTPRequestHandler
+import json, os, asyncio, sys
 
-# Allow importing main.py from the parent (root) directory
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import asyncio
-import logging
-from flask import Flask, request, jsonify
 from telegram import Update
-from main import build_application
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-app = Flask(__name__)
-
-# Build PTB application once at module level
-_ptb_app = build_application()
+from main import build_app, BOT_TOKEN
+import requests as req
 
 
-async def _process_update(data: dict):
-    await _ptb_app.initialize()
-    update = Update.de_json(data, _ptb_app.bot)
-    await _ptb_app.process_update(update)
+class handler(BaseHTTPRequestHandler):
+
+    def do_POST(self):
+        try:
+            length      = int(self.headers["Content-Length"])
+            body        = self.rfile.read(length)
+            update_data = json.loads(body.decode("utf-8"))
+            asyncio.run(process_update(update_data))
+        except Exception as e:
+            print(f"Error: {e}")
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"ok")
+
+    def do_GET(self):
+        # Visit /api/webhook in browser to auto-set the webhook
+        host        = self.headers.get("Host", "")
+        webhook_url = f"https://{host}/api/webhook"
+        r = req.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook",
+            json={"url": webhook_url, "allowed_updates": ["message", "callback_query"]},
+            timeout=8,
+        )
+        result = r.json()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps(result).encode())
 
 
-@app.route("/api/webhook", methods=["POST"])
-def webhook():
-    try:
-        data = request.get_json(force=True)
-        logger.info(f"[WEBHOOK] Update received: {str(data)[:150]}")
-        asyncio.run(_process_update(data))
-        return "OK", 200
-    except Exception as e:
-        logger.error(f"[WEBHOOK] Error: {e}")
-        return "Error", 500
-
-
-@app.route("/", methods=["GET"])
-@app.route("/api/webhook", methods=["GET"])
-def health():
-    return jsonify({"status": "ok", "bot": "Anti-Promotion Bot", "author": "SovitX"})
+async def process_update(update_data):
+    application = build_app()
+    await application.initialize()
+    update = Update.de_json(update_data, application.bot)
+    await application.process_update(update)
+    await application.shutdown()
