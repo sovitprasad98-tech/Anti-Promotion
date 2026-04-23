@@ -1,30 +1,19 @@
-import os
-import logging
+import os, logging, requests as req
 from telegram import Update
 from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    filters,
-    ContextTypes,
+    Application, CommandHandler, MessageHandler, filters, ContextTypes,
 )
-from groq import Groq
 
 # ══════════════════════════════════════════════
-#  CONFIG — set these in Vercel Environment Vars
+#  CONFIG
 # ══════════════════════════════════════════════
-BOT_TOKEN  = os.environ.get("BOT_TOKEN",  "8055567804:AAFXFOr68Xxl6dgGh-dKL_9gMX7xHVIdKx8")
-GROQ_KEY   = os.environ.get("GROQ_API_KEY","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")
-
-# Owner — all violation reports are forwarded here
-OWNER_ID = 8589416528   # @SovitX_developer
+BOT_TOKEN = os.environ.get("BOT_TOKEN",  "8055567804:AAFXFOr68Xxl6dgGh-dKL_9gMX7xHVIdKx8")
+GROQ_KEY  = os.environ.get("GROQ_API_KEY","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")
+OWNER_ID  = 8589416528   # @SovitX_developer
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-groq_client = Groq(api_key=GROQ_KEY)
-
-# In-memory warning store  { "chat_id": { "user_id": count } }
 warning_store: dict = {}
 
 GUIDELINES = (
@@ -37,28 +26,36 @@ GUIDELINES = (
 )
 
 # ══════════════════════════════════════════════
-#  GROQ AI — detect promotional messages
+#  GROQ API — direct HTTP, no SDK needed
 # ══════════════════════════════════════════════
-async def is_promotional(text: str) -> bool:
-    system_prompt = (
-        "You are a strict Telegram group content moderation AI. "
-        "Detect if the following message contains ANY of: "
-        "promotion of products/services, buying/selling offers, "
-        "invite-to-DM for money, deal-making, download link push, "
-        "spam, fraud, or earning/payment schemes. "
-        "Reply with exactly one word only: YES or NO."
-    )
+def is_promotional(text: str) -> bool:
     try:
-        response = groq_client.chat.completions.create(
-            model="llama3-70b-8192",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user",   "content": f'Analyse:\n"""\n{text}\n"""'},
-            ],
-            max_tokens=5,
-            temperature=0,
+        r = req.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {GROQ_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "llama3-70b-8192",
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a strict Telegram group moderation AI. "
+                            "Detect if the message contains: promotion, buying/selling, "
+                            "spam, fraud, DM invites for money, download link push, "
+                            "or earning/payment schemes. Reply only YES or NO."
+                        ),
+                    },
+                    {"role": "user", "content": f'Analyse:\n"""\n{text}\n"""'},
+                ],
+                "max_tokens": 5,
+                "temperature": 0,
+            },
+            timeout=10,
         )
-        verdict = response.choices[0].message.content.strip().upper()
+        verdict = r.json()["choices"][0]["message"]["content"].strip().upper()
         logger.info(f"[GROQ] {verdict!r} | {text[:60]!r}")
         return verdict.startswith("YES")
     except Exception as e:
@@ -95,7 +92,6 @@ def build_group_warning(user, warn_count: int, username_tag: str) -> str:
             "Admin has been personally notified about your activity.\n"
             "Continue and you will be *permanently banned* from this group."
         )
-
     return (
         f"⚠️ *COMMUNITY VIOLATION DETECTED* ⚠️\n"
         f"{'━' * 34}\n\n"
@@ -118,7 +114,7 @@ def build_group_warning(user, warn_count: int, username_tag: str) -> str:
 
 
 def build_owner_report(user, username_tag, group_name, group_id, warn_count, original_message) -> str:
-    preview = original_message if len(original_message) <= 800 else original_message[:800] + "\n…[truncated]"
+    preview = original_message if len(original_message) <= 800 else original_message[:800] + "\n…"
     return (
         f"🔔 *Violation Report*\n"
         f"{'━' * 34}\n\n"
@@ -144,10 +140,8 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
     message = update.message
     if not message or not update.effective_chat:
         return
-
     chat = update.effective_chat
     user = update.effective_user
-
     if chat.type not in ("group", "supergroup"):
         return
     if user.is_bot:
@@ -159,25 +153,24 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
     if not text or len(text) < 5:
         return
 
-    if not await is_promotional(text):
+    if not is_promotional(text):   # sync call — no await needed
         return
 
-    # Delete message
+    # Delete
     try:
         await message.delete()
     except Exception as e:
         logger.warning(f"[BOT] Delete failed: {e}")
 
-    # Update warning count
+    # Warning count
     cid, uid = str(chat.id), str(user.id)
     warning_store.setdefault(cid, {})
     warning_store[cid][uid] = warning_store[cid].get(uid, 0) + 1
-    warn_count = warning_store[cid][uid]
-
+    warn_count   = warning_store[cid][uid]
     username_tag = f"@{user.username}" if user.username else "_(no username)_"
     group_name   = chat.title or "Unknown Group"
 
-    # Send group warning
+    # Group warning
     try:
         await context.bot.send_message(
             chat_id=chat.id,
@@ -187,7 +180,7 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
     except Exception as e:
         logger.error(f"[BOT] Group warning failed: {e}")
 
-    # Send private report to owner
+    # Owner private report
     try:
         await context.bot.send_message(
             chat_id=OWNER_ID,
@@ -226,7 +219,7 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ══════════════════════════════════════════════
-#  BUILD APP  (called by api/webhook.py)
+#  BUILD APP
 # ══════════════════════════════════════════════
 def build_app():
     application = Application.builder().token(BOT_TOKEN).build()
